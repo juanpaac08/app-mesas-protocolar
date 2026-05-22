@@ -39,10 +39,24 @@ st.set_page_config(page_title="Asignación de mesas", layout="wide")
 # TEMA VISUAL AUTOMÁTICO
 # =========================================================
 def obtener_tipo_tema():
+    """Detecta el tema de Streamlit de forma más robusta.
+
+    En algunas versiones de Streamlit el tema viene como objeto y en otras
+    como diccionario. Si no se logra detectar, se usa light por seguridad.
+    """
     try:
-        theme_type = st.context.theme.type
-        if theme_type in ["light", "dark"]:
-            return theme_type
+        theme = getattr(st, "context", None).theme
+
+        if isinstance(theme, dict):
+            for key in ["type", "base"]:
+                value = theme.get(key)
+                if value in ["light", "dark"]:
+                    return value
+        else:
+            for key in ["type", "base"]:
+                value = getattr(theme, key, None)
+                if value in ["light", "dark"]:
+                    return value
     except Exception:
         pass
 
@@ -54,7 +68,6 @@ def obtener_tipo_tema():
         pass
 
     return "light"
-
 
 TIPO_TEMA = obtener_tipo_tema()
 TEXTO_TEMA = "white" if TIPO_TEMA == "dark" else "black"
@@ -682,11 +695,7 @@ def figura_mesa(n):
         # - Streamlit dark mode: letras blancas
         # - Streamlit light mode: letras negras
         # - PDF se mantiene independiente y con letras negras
-        texto = (
-            f"<span style='color:{TEXTO_TEMA}'>"
-            f"<b>{d['nombre']}</b>"
-            f"</span>"
-        )
+        texto = f"<b>{d['nombre']}</b>"
 
         fig.add_annotation(
             x=x,
@@ -809,27 +818,20 @@ def dibujar_texto_centrado(c, texto, x, y, max_width, font_size=8, leading=9):
         c.drawCentredString(x, y_inicio - i * leading, linea)
 
 
-def dibujar_texto_pdf_en_circulo(c, x, y, nombre, cargo, empresa, max_width=66):
-    """Dibuja nombre en negrita, cargo y empresa dentro del círculo del asiento."""
-    nombre = recortar_texto(nombre, 26)
-    cargo = recortar_texto(cargo, 28)
-    empresa = recortar_texto(empresa, 28)
+def dibujar_texto_pdf_en_circulo(c, x, y, nombre, max_width=66):
+    """Dibuja solo el nombre en negrita dentro del círculo del asiento.
+
+    El cargo y la empresa quedan únicamente en la tabla inferior del PDF.
+    """
+    nombre = recortar_texto(nombre, 28)
 
     c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 7.2)
 
-    # Nombre en negrita
-    c.setFont("Helvetica-Bold", 6.7)
-    if c.stringWidth(nombre, "Helvetica-Bold", 6.7) > max_width:
-        nombre = recortar_texto(nombre, 22)
-    c.drawCentredString(x, y + 7, nombre)
+    if c.stringWidth(nombre, "Helvetica-Bold", 7.2) > max_width:
+        nombre = recortar_texto(nombre, 24)
 
-    # Cargo y empresa bajo el nombre
-    c.setFont("Helvetica", 5.8)
-    if cargo:
-        c.drawCentredString(x, y - 2, cargo)
-    if empresa:
-        c.drawCentredString(x, y - 11, empresa)
-
+    c.drawCentredString(x, y - 2, nombre)
 
 def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
     datos = datos_mesa_para_pdf(n)
@@ -851,9 +853,6 @@ def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
     for item in datos:
         asiento = item["asiento"]
         nombre = item["nombre"]
-        cargo = item["cargo"]
-        empresa = item["empresa"]
-
         ang = math.pi / 2 - 2 * math.pi * (asiento - 1) / CAPACIDAD
         x = cx + radio * math.cos(ang)
         y = cy + radio * math.sin(ang)
@@ -868,7 +867,7 @@ def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
         c.setFont("Helvetica-Bold", 6)
         c.drawCentredString(x, y + 21, f"Asiento {asiento}")
 
-        dibujar_texto_pdf_en_circulo(c, x, y - 2, nombre, cargo, empresa, max_width=66)
+        dibujar_texto_pdf_en_circulo(c, x, y - 2, nombre, max_width=66)
 
 
 def crear_pdf_asignacion():
@@ -886,7 +885,7 @@ def crear_pdf_asignacion():
         c.drawCentredString(width / 2, height - 2.1 * cm, nombre_version(VERSION_ACTIVA))
 
         # Diagrama circular
-        dibujar_diagrama_mesa_pdf(c, n, width / 2, height - 7.1 * cm)
+        dibujar_diagrama_mesa_pdf(c, n, width / 2, height - 8.2 * cm)
 
         # Tabla inferior
         datos = datos_mesa_para_pdf(n)
