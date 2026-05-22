@@ -12,8 +12,11 @@ from google.oauth2.service_account import Credentials
 from PIL import Image
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen import canvas
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 
 
 # =========================================================
@@ -60,15 +63,6 @@ TIPO_TEMA = obtener_tipo_tema()
 TEXTO_TEMA = "white" if TIPO_TEMA == "dark" else "black"
 FONDO_TEMA = "rgba(0,0,0,0)"
 
-# Configuración Plotly para mejorar uso en celulares.
-# Evita que el gráfico capture el gesto de scroll.
-PLOTLY_CONFIG = {
-    "scrollZoom": False,
-    "displayModeBar": False,
-    "doubleClick": False,
-    "responsive": True,
-}
-
 
 # =========================================================
 # CONEXIÓN GOOGLE SHEETS
@@ -98,6 +92,15 @@ def conectar_google_sheets():
 @st.cache_resource
 def obtener_spreadsheet():
     return conectar_google_sheets()
+
+
+def worksheet_existe(nombre_hoja):
+    spreadsheet = obtener_spreadsheet()
+    try:
+        spreadsheet.worksheet(nombre_hoja)
+        return True
+    except gspread.WorksheetNotFound:
+        return False
 
 
 def obtener_o_crear_worksheet(nombre_hoja, columnas):
@@ -274,6 +277,8 @@ asignaciones = st.session_state.asignaciones
 
 
 def version_activa():
+    global versiones
+
     mask = versiones["Activa"].astype(str).str.lower().isin(["sí", "si", "true", "1"])
     if mask.any():
         return int(versiones.loc[mask, "Version"].iloc[0])
@@ -356,40 +361,34 @@ def crear_version_copia(version_origen):
     return nueva
 
 
-def eliminar_version(v_eliminar):
+def eliminar_version(version_a_eliminar):
     global versiones, asignaciones
 
-    v_eliminar = int(v_eliminar)
+    version_a_eliminar = int(version_a_eliminar)
 
     if len(versiones) <= 1:
         return False, "No se puede eliminar la única versión existente."
 
-    versiones = versiones.copy()
-    asignaciones = asignaciones.copy()
+    if version_a_eliminar not in set(versiones["Version"].astype(int)):
+        return False, "La versión seleccionada no existe."
 
-    era_activa = (
-        versiones.loc[versiones["Version"] == v_eliminar, "Activa"]
-        .astype(str)
-        .str.lower()
-        .isin(["sí", "si", "true", "1"])
-        .any()
-    )
+    versiones_nuevas = versiones[versiones["Version"] != version_a_eliminar].copy()
+    asignaciones_nuevas = asignaciones[asignaciones["Version"] != version_a_eliminar].copy()
 
-    versiones = versiones[versiones["Version"] != v_eliminar].copy()
-    asignaciones = asignaciones[asignaciones["Version"] != v_eliminar].copy()
+    # Si se elimina la versión activa, se activa la versión más reciente restante.
+    activa_actual = version_activa()
+    if activa_actual == version_a_eliminar:
+        versiones_nuevas["Activa"] = "No"
+        nueva_activa = int(versiones_nuevas["Version"].max())
+        versiones_nuevas.loc[versiones_nuevas["Version"] == nueva_activa, "Activa"] = "Sí"
 
-    if era_activa:
-        nueva_activa = int(versiones["Version"].min())
-        versiones["Activa"] = "No"
-        versiones.loc[versiones["Version"] == nueva_activa, "Activa"] = "Sí"
+    st.session_state.versiones = versiones_nuevas
+    st.session_state.asignaciones = asignaciones_nuevas
 
-    st.session_state.versiones = versiones
-    st.session_state.asignaciones = asignaciones
+    guardar_versiones(versiones_nuevas)
+    guardar_asignaciones(asignaciones_nuevas)
 
-    guardar_versiones(versiones)
-    guardar_asignaciones(asignaciones)
-
-    return True, f"Se eliminó la Versión {v_eliminar}."
+    return True, f"Se eliminó la Versión {version_a_eliminar}."
 
 
 def df_asistentes_version(v):
@@ -580,19 +579,8 @@ def figura_plano():
         ),
     ))
 
-    fig.update_xaxes(
-        visible=False,
-        range=(0, img_w),
-        constrain="domain",
-        fixedrange=True,
-    )
-    fig.update_yaxes(
-        visible=False,
-        range=(img_h, 0),
-        scaleanchor="x",
-        scaleratio=1,
-        fixedrange=True,
-    )
+    fig.update_xaxes(visible=False, range=(0, img_w), constrain="domain")
+    fig.update_yaxes(visible=False, range=(img_h, 0), scaleanchor="x", scaleratio=1)
 
     fig.update_layout(
         height=720,
@@ -602,8 +590,6 @@ def figura_plano():
         paper_bgcolor=FONDO_TEMA,
         plot_bgcolor=FONDO_TEMA,
         font=dict(color=TEXTO_TEMA),
-        dragmode=False,
-        hovermode="closest",
     )
 
     return fig
@@ -638,9 +624,6 @@ def figura_mesa(n):
 
     fig = go.Figure()
 
-    # =====================================================
-    # MESA CENTRAL
-    # =====================================================
     fig.add_shape(
         type="circle",
         x0=-0.45,
@@ -654,93 +637,62 @@ def figura_mesa(n):
     fig.add_annotation(
         x=0,
         y=0,
-        text=f"<b>MESA {n}</b>",
+        text=f"MESA {n}",
         showarrow=False,
-        font=dict(color="white", size=18),
+        font=dict(color="white", size=18)
     )
 
-    # =====================================================
-    # ASIENTOS
-    # =====================================================
-    for asiento in range(1, CAPACIDAD + 1):
+    xs, ys, textos, custom = [], [], [], []
 
+    for asiento in range(1, CAPACIDAD + 1):
         ang = math.pi / 2 - 2 * math.pi * (asiento - 1) / CAPACIDAD
 
-        x = 1.38 * math.cos(ang)
-        y = 1.38 * math.sin(ang)
+        x = 1.35 * math.cos(ang)
+        y = 1.35 * math.sin(ang)
 
         d = datos_por_asiento[asiento]
 
-        # ---------------------------------------------
-        # CÍRCULO DEL INVITADO
-        # ---------------------------------------------
-        radio = 0.33
+        xs.append(x)
+        ys.append(y)
+        textos.append(f"{asiento}. {d['nombre']}")
+        custom.append([asiento, d["id"], d["nombre"], d["cargo"], d["empresa"]])
 
-        fig.add_shape(
-            type="circle",
-            x0=x - radio,
-            y0=y - radio,
-            x1=x + radio,
-            y1=y + radio,
-            fillcolor="white",
-            line=dict(color="#333333", width=2),
-        )
+    fig.add_trace(go.Scatter(
+        x=xs,
+        y=ys,
+        mode="markers+text",
+        marker=dict(size=12, color="rgba(0,0,0,0)"),
+        text=textos,
+        textposition="middle center",
+        textfont=dict(size=12, color=TEXTO_TEMA),
+        customdata=custom,
+        hovertemplate=(
+            "Asiento %{customdata[0]}<br>"
+            "ID: %{customdata[1]}<br>"
+            "Nombre: %{customdata[2]}<br>"
+            "Cargo: %{customdata[3]}<br>"
+            "Empresa: %{customdata[4]}"
+            "<extra></extra>"
+        ),
+    ))
 
-        # ---------------------------------------------
-        # TEXTO
-        # ---------------------------------------------
-        texto = (
-            f"<b>{d['nombre']}</b>"
-            f"<br><span style='font-size:10px'>{d['cargo']}</span>"
-            f"<br><span style='font-size:10px'>{d['empresa']}</span>"
-        )
-
-        fig.add_annotation(
-            x=x,
-            y=y,
-            text=texto,
-            showarrow=False,
-            align="center",
-            font=dict(
-                size=11,
-                color="black",
-                family="Arial"
-            ),
-        )
-
-    # =====================================================
-    # LAYOUT
-    # =====================================================
-    fig.update_xaxes(
-        visible=False,
-        range=(-2.2, 2.2),
-        fixedrange=True
-    )
-
-    fig.update_yaxes(
-        visible=False,
-        range=(-1.9, 1.9),
-        scaleanchor="x",
-        scaleratio=1,
-        fixedrange=True
-    )
+    fig.update_xaxes(visible=False, range=(-2.2, 2.2))
+    fig.update_yaxes(visible=False, range=(-1.9, 1.9), scaleanchor="x", scaleratio=1)
 
     fig.update_layout(
-        height=520,
+        height=430,
         margin=dict(l=0, r=0, t=0, b=0),
         showlegend=False,
         paper_bgcolor=FONDO_TEMA,
         plot_bgcolor=FONDO_TEMA,
         font=dict(color=TEXTO_TEMA),
-        dragmode=False,
-        hovermode=False,
     )
 
     return fig
 
 
 # =========================================================
-# PDF: UNA MESA POR PÁGINA + DIAGRAMA CIRCULAR
+# PDF
 # =========================================================
 def texto_seguro(valor):
     if pd.isna(valor):
@@ -748,11 +700,44 @@ def texto_seguro(valor):
     return str(valor)
 
 
+def dividir_texto_pdf(texto, max_width, font_name="Helvetica", font_size=8, max_lines=3):
+    texto = texto_seguro(texto).strip()
+
+    if not texto:
+        return [""]
+
+    palabras = texto.split()
+    lineas = []
+    linea_actual = ""
+
+    for palabra in palabras:
+        candidata = palabra if not linea_actual else f"{linea_actual} {palabra}"
+
+        if stringWidth(candidata, font_name, font_size) <= max_width:
+            linea_actual = candidata
+        else:
+            if linea_actual:
+                lineas.append(linea_actual)
+            linea_actual = palabra
+
+        if len(lineas) >= max_lines:
+            break
+
+    if linea_actual and len(lineas) < max_lines:
+        lineas.append(linea_actual)
+
+    if len(lineas) > max_lines:
+        lineas = lineas[:max_lines]
+
+    return lineas
+
+
 def datos_mesa_para_pdf(n):
     df = asistentes_v[asistentes_v["Mesa"] == n].copy()
     df = df.sort_values("Asiento", na_position="last")
 
     filas = []
+
     for asiento in range(1, CAPACIDAD + 1):
         fila = df[df["Asiento"] == asiento]
 
@@ -775,128 +760,104 @@ def datos_mesa_para_pdf(n):
     return filas
 
 
-def recortar_texto(texto, max_chars):
-    texto = texto_seguro(texto)
-    if len(texto) <= max_chars:
-        return texto
-    return texto[: max_chars - 1] + "…"
-
-
-def dibujar_texto_centrado(c, texto, x, y, max_width, font_size=8, leading=9):
-    texto = recortar_texto(texto, 34)
-    palabras = texto.split()
-    lineas = []
-    actual = ""
-
-    for palabra in palabras:
-        prueba = (actual + " " + palabra).strip()
-        if c.stringWidth(prueba, "Helvetica", font_size) <= max_width:
-            actual = prueba
-        else:
-            if actual:
-                lineas.append(actual)
-            actual = palabra
-
-    if actual:
-        lineas.append(actual)
-
-    lineas = lineas[:2]
-
+def dibujar_texto_centrado_multilinea(c, texto, x, y, max_width, font_name="Helvetica", font_size=8, leading=9, max_lines=3):
+    lineas = dividir_texto_pdf(texto, max_width, font_name, font_size, max_lines)
     total_h = (len(lineas) - 1) * leading
-    y_inicio = y + total_h / 2
 
-    c.setFont("Helvetica", font_size)
+    c.setFont(font_name, font_size)
     c.setFillColor(colors.black)
 
     for i, linea in enumerate(lineas):
-        c.drawCentredString(x, y_inicio - i * leading, linea)
+        c.drawCentredString(x, y + total_h / 2 - i * leading, linea)
 
 
-def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
+def dibujar_diagrama_mesa_pdf(c, n, center_x, center_y):
     datos = datos_mesa_para_pdf(n)
 
-    # Mesa central
-    c.setFillColor(colors.HexColor("#5B9BD5"))
-    c.setStrokeColor(colors.HexColor("#2F5597"))
-    c.setLineWidth(1.5)
-    c.circle(cx, cy, 34, fill=1, stroke=1)
+    radio_mesa = 48
+    radio_asientos = 185
+    radio_circulo_asiento = 42
 
-    c.setFillColor(colors.white)
-    c.setFont("Helvetica-Bold", 13)
-    c.drawCentredString(cx, cy - 4, f"MESA {n}")
+    # Mesa central
+    c.setStrokeColor(colors.HexColor("#2F5597"))
+    c.setFillColor(colors.HexColor("#D9EAF7"))
+    c.setLineWidth(1.5)
+    c.circle(center_x, center_y, radio_mesa, stroke=1, fill=1)
+
+    c.setFillColor(colors.black)
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(center_x, center_y + 4, f"MESA {n}")
 
     # Asientos alrededor
-    radio = 122
-
     for item in datos:
         asiento = item["asiento"]
-        nombre = item["nombre"]
+        nombre = item["nombre"] if item["nombre"] else "Disponible"
 
         ang = math.pi / 2 - 2 * math.pi * (asiento - 1) / CAPACIDAD
-        x = cx + radio * math.cos(ang)
-        y = cy + radio * math.sin(ang)
+        x = center_x + radio_asientos * math.cos(ang)
+        y = center_y + radio_asientos * math.sin(ang)
 
+        c.setStrokeColor(colors.HexColor("#4A4A4A"))
         c.setFillColor(colors.white)
-        c.setStrokeColor(colors.black)
-        c.setLineWidth(0.8)
-        c.roundRect(x - 48, y - 18, 96, 36, 8, fill=1, stroke=1)
+        c.setLineWidth(1)
+        c.circle(x, y, radio_circulo_asiento, stroke=1, fill=1)
 
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 7)
-        c.drawCentredString(x, y + 8, f"Asiento {asiento}")
+        c.setFont("Helvetica-Bold", 8)
+        c.drawCentredString(x, y + 20, f"Asiento {asiento}")
 
-        dibujar_texto_centrado(c, nombre, x, y - 6, 86, font_size=7, leading=8)
+        dibujar_texto_centrado_multilinea(
+            c,
+            nombre,
+            x,
+            y - 2,
+            max_width=radio_circulo_asiento * 1.65,
+            font_name="Helvetica",
+            font_size=7.5,
+            leading=8,
+            max_lines=3,
+        )
 
 
 def crear_pdf_asignacion():
     buffer = BytesIO()
     c = canvas.Canvas(buffer, pagesize=letter)
-
-    width, height = letter
+    page_w, page_h = letter
 
     for n in range(1, 31):
+        # Título
         c.setFillColor(colors.black)
         c.setFont("Helvetica-Bold", 18)
-        c.drawCentredString(width / 2, height - 1.5 * cm, f"Asignación de Mesa {n}")
+        c.drawCentredString(page_w / 2, page_h - 45, f"Asignación de Mesa {n}")
 
         c.setFont("Helvetica", 10)
-        c.drawCentredString(width / 2, height - 2.1 * cm, nombre_version(VERSION_ACTIVA))
+        c.drawCentredString(page_w / 2, page_h - 63, nombre_version(VERSION_ACTIVA))
+        c.drawCentredString(page_w / 2, page_h - 78, datetime.now().strftime("Generado el %d-%m-%Y %H:%M"))
 
-        # Diagrama circular
-        dibujar_diagrama_mesa_pdf(c, n, width / 2, height - 7.1 * cm)
+        # Diagrama circular, una mesa por página
+        dibujar_diagrama_mesa_pdf(c, n, page_w / 2, 430)
 
-        # Tabla inferior
+        # Resumen inferior en tabla simple
         datos = datos_mesa_para_pdf(n)
-        y = 7.8 * cm
+        y_base = 150
+        c.setFont("Helvetica-Bold", 9)
+        c.drawString(60, y_base + 25, "Asiento")
+        c.drawString(120, y_base + 25, "Nombre")
+        c.drawString(320, y_base + 25, "Empresa")
 
-        c.setFillColor(colors.HexColor("#D9EAF7"))
-        c.rect(1.2 * cm, y, width - 2.4 * cm, 0.55 * cm, fill=1, stroke=0)
+        c.setStrokeColor(colors.grey)
+        c.line(55, y_base + 20, page_w - 55, y_base + 20)
 
-        c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 8)
-        c.drawString(1.35 * cm, y + 0.18 * cm, "Asiento")
-        c.drawString(2.7 * cm, y + 0.18 * cm, "Nombre")
-        c.drawString(8.4 * cm, y + 0.18 * cm, "Cargo")
-        c.drawString(13.2 * cm, y + 0.18 * cm, "Empresa")
-
-        y -= 0.48 * cm
-        c.setFont("Helvetica", 7.3)
-
+        c.setFont("Helvetica", 8)
+        y = y_base + 5
         for item in datos:
-            c.setFillColor(colors.black)
-            c.drawString(1.55 * cm, y + 0.12 * cm, str(item["asiento"]))
-            c.drawString(2.7 * cm, y + 0.12 * cm, recortar_texto(item["nombre"], 38))
-            c.drawString(8.4 * cm, y + 0.12 * cm, recortar_texto(item["cargo"], 30))
-            c.drawString(13.2 * cm, y + 0.12 * cm, recortar_texto(item["empresa"], 28))
+            c.drawString(70, y, str(item["asiento"]))
+            c.drawString(120, y, item["nombre"][:38])
+            c.drawString(320, y, item["empresa"][:32])
+            y -= 12
 
-            c.setStrokeColor(colors.lightgrey)
-            c.line(1.2 * cm, y, width - 1.2 * cm, y)
-
-            y -= 0.43 * cm
-
-        c.setFillColor(colors.grey)
-        c.setFont("Helvetica", 7)
-        c.drawCentredString(width / 2, 0.8 * cm, datetime.now().strftime("Generado el %d-%m-%Y %H:%M"))
+        c.setFont("Helvetica", 8)
+        c.drawRightString(page_w - 45, 28, f"Página {n} de 30")
 
         c.showPage()
 
@@ -970,8 +931,7 @@ with tab1:
         figura_plano(),
         use_container_width=True,
         on_select="rerun",
-        selection_mode="points",
-        config=PLOTLY_CONFIG,
+        selection_mode="points"
     )
 
     mesa_click = None
@@ -1001,11 +961,7 @@ with tab2:
 
     st.subheader(f"Mesa {n}")
 
-    st.plotly_chart(
-        figura_mesa(n),
-        use_container_width=True,
-        config=PLOTLY_CONFIG,
-    )
+    st.plotly_chart(figura_mesa(n), use_container_width=True)
 
     st.caption("Pasa el mouse sobre cada nombre para ver ID, cargo y empresa.")
 
@@ -1104,6 +1060,8 @@ with tab2:
                         "Asiento": asiento,
                     })
 
+            # Si algún invitado seleccionado estaba asignado a otra mesa en la misma versión,
+            # se elimina su asignación anterior antes de guardar la nueva.
             ids_nuevos = [str(f["ID"]) for f in nuevas_filas]
             df_asig = df_asig[
                 ~(
@@ -1211,7 +1169,7 @@ with tab5:
         hide_index=True
     )
 
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
 
     with c1:
         st.markdown("### Crear versión desde cero")
@@ -1231,46 +1189,43 @@ with tab5:
             st.success(f"Se creó la Versión {nueva} como copia.")
             st.rerun()
 
-    st.divider()
+    with c3:
+        st.markdown("### Eliminar versión")
+        st.caption("Elimina una versión y todas sus asignaciones guardadas.")
 
-    st.markdown("### Eliminar versión")
-    st.warning("Eliminar una versión borra sus asignaciones. Esta acción no se puede deshacer desde la app.")
+        opciones_eliminar = {
+            f"{int(row['Version'])} - {row['Nombre']}": int(row["Version"])
+            for _, row in versiones.sort_values("Version").iterrows()
+        }
 
-    opciones_eliminar = {
-        f"{int(row['Version'])} - {row['Nombre']}": int(row["Version"])
-        for _, row in versiones.sort_values("Version").iterrows()
-    }
+        seleccion_eliminar = st.selectbox(
+            "Versión a eliminar",
+            list(opciones_eliminar.keys()),
+            key="version_a_eliminar",
+        )
 
-    version_a_eliminar_label = st.selectbox(
-        "Selecciona la versión que deseas eliminar",
-        list(opciones_eliminar.keys()),
-        key="version_a_eliminar"
-    )
+        version_eliminar = opciones_eliminar[seleccion_eliminar]
 
-    confirmar_eliminacion = st.checkbox(
-        "Confirmo que quiero eliminar esta versión",
-        key="confirmar_eliminacion_version"
-    )
-
-    if st.button("Eliminar versión seleccionada", type="secondary"):
-        if not confirmar_eliminacion:
-            st.error("Debes marcar la confirmación antes de eliminar.")
+        if len(versiones) <= 1:
+            st.info("No se puede eliminar la única versión existente.")
         else:
-            ok, msg = eliminar_version(opciones_eliminar[version_a_eliminar_label])
-            recargar_datos()
-            if ok:
-                st.success(msg)
-                st.rerun()
-            else:
-                st.error(msg)
+            if st.button("Eliminar versión seleccionada", type="secondary"):
+                ok, mensaje = eliminar_version(version_eliminar)
+                recargar_datos()
+
+                if ok:
+                    st.success(mensaje)
+                    st.rerun()
+                else:
+                    st.error(mensaje)
 
 
 with tab6:
     st.subheader("Exportar PDF")
 
     st.write(
-        "Genera un PDF tamaño carta con una mesa por página. "
-        "Cada página incluye el diagrama circular de la mesa y el listado de invitados."
+        "Genera un PDF tamaño carta con la asignación de la versión activa. "
+        "El documento incluye una mesa por página con diagrama circular."
     )
 
     pdf_bytes = crear_pdf_asignacion()
@@ -1289,6 +1244,5 @@ st.divider()
 st.caption(
     "Base de datos: Google Sheets. "
     "Las versiones se guardan en las hojas Versiones y Asignaciones. "
-    "El PDF se genera en tamaño carta con una mesa por página. "
-    "Los gráficos tienen zoom/pan desactivado para facilitar el scroll en celular."
+    "El PDF se genera en tamaño carta, una mesa por página, con diagrama circular."
 )
