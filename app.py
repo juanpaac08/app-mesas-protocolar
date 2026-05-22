@@ -1019,7 +1019,31 @@ with tab1:
 
 
 with tab2:
-    n = st.session_state.get("mesa_seleccionada", 1)
+    # Selector directo de mesa dentro de la pestaña Detalle de mesa.
+    # Permite cambiar de mesa sin volver al plano general.
+    mesa_actual = int(st.session_state.get("mesa_seleccionada", 1))
+
+    opciones_mesa_detalle = {
+        f"Mesa {i} · {conteo_mesa(i)}/{CAPACIDAD} invitados": i
+        for i in range(1, 31)
+    }
+
+    etiquetas_mesa_detalle = list(opciones_mesa_detalle.keys())
+
+    indice_mesa_actual = max(
+        0,
+        min(mesa_actual - 1, len(etiquetas_mesa_detalle) - 1)
+    )
+
+    mesa_detalle_label = st.selectbox(
+        "Cambiar mesa",
+        etiquetas_mesa_detalle,
+        index=indice_mesa_actual,
+        key="selector_mesa_detalle",
+    )
+
+    n = opciones_mesa_detalle[mesa_detalle_label]
+    st.session_state.mesa_seleccionada = n
 
     st.subheader(f"Mesa {n}")
 
@@ -1029,7 +1053,7 @@ with tab2:
         config=PLOTLY_CONFIG,
     )
 
-    st.caption("Pasa el mouse sobre cada nombre para ver ID, cargo y empresa.")
+    st.caption("En el diagrama se muestra solo el nombre. Cargo y empresa se ven en la tabla inferior.")
 
     if st.button("Mostrar / ocultar detalle de invitados de esta mesa"):
         st.session_state[f"mostrar_detalle_mesa_{n}"] = not st.session_state.get(
