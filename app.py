@@ -683,9 +683,11 @@ def figura_mesa(n):
         # - Streamlit light mode: letras negras
         # - PDF se mantiene independiente y con letras negras
         texto = (
+            f"<span style='color:{TEXTO_TEMA}'>"
             f"<b>{d['nombre']}</b>"
-            f"<br><span style='font-size:10px'>{d['cargo']}</span>"
-            f"<br><span style='font-size:10px'>{d['empresa']}</span>"
+            f"<br><span style='font-size:10px; color:{TEXTO_TEMA}'>{d['cargo']}</span>"
+            f"<br><span style='font-size:10px; color:{TEXTO_TEMA}'>{d['empresa']}</span>"
+            f"</span>"
         )
 
         fig.add_annotation(
@@ -809,6 +811,28 @@ def dibujar_texto_centrado(c, texto, x, y, max_width, font_size=8, leading=9):
         c.drawCentredString(x, y_inicio - i * leading, linea)
 
 
+def dibujar_texto_pdf_en_circulo(c, x, y, nombre, cargo, empresa, max_width=66):
+    """Dibuja nombre en negrita, cargo y empresa dentro del círculo del asiento."""
+    nombre = recortar_texto(nombre, 26)
+    cargo = recortar_texto(cargo, 28)
+    empresa = recortar_texto(empresa, 28)
+
+    c.setFillColor(colors.black)
+
+    # Nombre en negrita
+    c.setFont("Helvetica-Bold", 6.7)
+    if c.stringWidth(nombre, "Helvetica-Bold", 6.7) > max_width:
+        nombre = recortar_texto(nombre, 22)
+    c.drawCentredString(x, y + 7, nombre)
+
+    # Cargo y empresa bajo el nombre
+    c.setFont("Helvetica", 5.8)
+    if cargo:
+        c.drawCentredString(x, y - 2, cargo)
+    if empresa:
+        c.drawCentredString(x, y - 11, empresa)
+
+
 def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
     datos = datos_mesa_para_pdf(n)
 
@@ -823,26 +847,30 @@ def dibujar_diagrama_mesa_pdf(c, n, cx, cy):
     c.drawCentredString(cx, cy - 4, f"MESA {n}")
 
     # Asientos alrededor
-    radio = 122
+    radio = 126
+    radio_circulo = 38
 
     for item in datos:
         asiento = item["asiento"]
         nombre = item["nombre"]
+        cargo = item["cargo"]
+        empresa = item["empresa"]
 
         ang = math.pi / 2 - 2 * math.pi * (asiento - 1) / CAPACIDAD
         x = cx + radio * math.cos(ang)
         y = cy + radio * math.sin(ang)
 
+        # Círculo del invitado en PDF. Texto siempre negro en PDF.
         c.setFillColor(colors.white)
         c.setStrokeColor(colors.black)
-        c.setLineWidth(0.8)
-        c.roundRect(x - 48, y - 18, 96, 36, 8, fill=1, stroke=1)
+        c.setLineWidth(0.9)
+        c.circle(x, y, radio_circulo, fill=1, stroke=1)
 
         c.setFillColor(colors.black)
-        c.setFont("Helvetica-Bold", 7)
-        c.drawCentredString(x, y + 8, f"Asiento {asiento}")
+        c.setFont("Helvetica-Bold", 6)
+        c.drawCentredString(x, y + 21, f"Asiento {asiento}")
 
-        dibujar_texto_centrado(c, nombre, x, y - 6, 86, font_size=7, leading=8)
+        dibujar_texto_pdf_en_circulo(c, x, y - 2, nombre, cargo, empresa, max_width=66)
 
 
 def crear_pdf_asignacion():
