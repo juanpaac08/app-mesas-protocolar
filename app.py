@@ -1,5 +1,6 @@
 import base64
 import math
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 
@@ -9,6 +10,11 @@ import plotly.graph_objects as go
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from PIL import Image
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.units import cm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
 
 
 # =========================================================
@@ -22,6 +28,8 @@ SPREADSHEET_ID = "1-__QYpgasM2bHjK0amIgZIrDXlLLOGSf40yLUky3DUU"
 
 HOJA_ASISTENTES = "Asistentes"
 HOJA_MESAS = "Mesas"
+HOJA_VERSIONES = "Versiones"
+HOJA_ASIGNACIONES = "Asignaciones"
 
 CAPACIDAD = 10
 
@@ -58,27 +66,6 @@ FONDO_TEMA = "rgba(0,0,0,0)"
 # CONEXIÓN GOOGLE SHEETS
 # =========================================================
 def conectar_google_sheets():
-    """
-    Requiere configurar credenciales en Streamlit Secrets.
-
-    En Streamlit Cloud:
-    App → Settings → Secrets
-
-    Debe existir este bloque:
-
-    [gcp_service_account]
-    type = "service_account"
-    project_id = "..."
-    private_key_id = "..."
-    private_key = "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
-    client_email = "..."
-    client_id = "..."
-    auth_uri = "https://accounts.google.com/o/oauth2/auth"
-    token_uri = "https://oauth2.googleapis.com/token"
-    auth_provider_x509_cert_url = "https://www.googleapis.com/oauth2/v1/certs"
-    client_x509_cert_url = "..."
-    universe_domain = "googleapis.com"
-    """
     scopes = [
         "https://www.googleapis.com/auth/spreadsheets",
         "https://www.googleapis.com/auth/drive",
@@ -105,9 +92,34 @@ def obtener_spreadsheet():
     return conectar_google_sheets()
 
 
-def leer_worksheet(nombre_hoja):
+def worksheet_existe(nombre_hoja):
     spreadsheet = obtener_spreadsheet()
-    ws = spreadsheet.worksheet(nombre_hoja)
+    try:
+        spreadsheet.worksheet(nombre_hoja)
+        return True
+    except gspread.WorksheetNotFound:
+        return False
+
+
+def obtener_o_crear_worksheet(nombre_hoja, columnas):
+    spreadsheet = obtener_spreadsheet()
+
+    try:
+        ws = spreadsheet.worksheet(nombre_hoja)
+    except gspread.WorksheetNotFound:
+        ws = spreadsheet.add_worksheet(title=nombre_hoja, rows=1000, cols=max(len(columnas), 10))
+        ws.update(values=[columnas], range_name="A1")
+
+    return ws
+
+
+def leer_worksheet(nombre_hoja, columnas=None):
+    if columnas is None:
+        spreadsheet = obtener_spreadsheet()
+        ws = spreadsheet.worksheet(nombre_hoja)
+    else:
+        ws = obtener_o_crear_worksheet(nombre_hoja, columnas)
+
     rows = ws.get_all_records()
     return pd.DataFrame(rows), ws
 
@@ -119,11 +131,16 @@ def limpiar_valores_para_sheet(df):
     return df
 
 
-def escribir_worksheet(nombre_hoja, df):
-    spreadsheet = obtener_spreadsheet()
-    ws = spreadsheet.worksheet(nombre_hoja)
+def escribir_worksheet(nombre_hoja, df, columnas):
+    ws = obtener_o_crear_worksheet(nombre_hoja, columnas)
 
     df_limpio = limpiar_valores_para_sheet(df)
+
+    for col in columnas:
+        if col not in df_limpio.columns:
+            df_limpio[col] = ""
+
+    df_limpio = df_limpio[columnas]
 
     valores = [df_limpio.columns.tolist()] + df_limpio.astype(str).values.tolist()
 
@@ -134,23 +151,30 @@ def escribir_worksheet(nombre_hoja, df):
 # =========================================================
 # DATOS
 # =========================================================
-@st.cache_data(ttl=5)
-def cargar_datos():
-    asistentes, _ = leer_worksheet(HOJA_ASISTENTES)
-    mesas, _ = leer_worksheet(HOJA_MESAS)
+COLUMNAS_ASISTENTES = ["ID", "Mesa", "Asiento", "Nombre", "Cargo", "Empresa", "Confirmación"]
+COLUMNAS_MESAS = ["MesaID", "NombreMesa", "Sector", "Tipo"]
+COLUMNAS_VERSIONES = ["Version", "Nombre", "Activa", "Creada"]
+COLUMNAS_ASIGNACIONES = ["Version", "ID", "Mesa", "Asiento"]
 
+
+def normalizar_asistentes(asistentes):
     if asistentes.empty:
-        asistentes = pd.DataFrame(columns=["ID", "Mesa", "Asiento", "Nombre", "Cargo", "Empresa", "Confirmación"])
+        asistentes = pd.DataFrame(columns=COLUMNAS_ASISTENTES)
 
-    if mesas.empty:
-        mesas = pd.DataFrame(columns=["MesaID", "NombreMesa", "Sector", "Tipo"])
-
-    for col in ["ID", "Mesa", "Asiento", "Nombre", "Cargo", "Empresa", "Confirmación"]:
+    for col in COLUMNAS_ASISTENTES:
         if col not in asistentes.columns:
             asistentes[col] = ""
 
     asistentes["Mesa"] = pd.to_numeric(asistentes["Mesa"], errors="coerce").astype("Int64")
     asistentes["Asiento"] = pd.to_numeric(asistentes["Asiento"], errors="coerce").astype("Int64")
+    asistentes["ID"] = asistentes["ID"].astype(str)
+
+    return asistentes
+
+
+def normalizar_mesas(mesas):
+    if mesas.empty:
+        mesas = pd.DataFrame(columns=COLUMNAS_MESAS)
 
     if "MesaID" not in mesas.columns:
         mesas["MesaID"] = range(1, len(mesas) + 1)
@@ -158,25 +182,199 @@ def cargar_datos():
     if "NombreMesa" not in mesas.columns:
         mesas["NombreMesa"] = mesas["MesaID"].apply(lambda x: f"Mesa {x}")
 
-    return asistentes, mesas
+    return mesas
+
+
+def normalizar_versiones(versiones):
+    if versiones.empty:
+        versiones = pd.DataFrame([{
+            "Version": 1,
+            "Nombre": "Versión 1",
+            "Activa": "Sí",
+            "Creada": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        }])
+
+    for col in COLUMNAS_VERSIONES:
+        if col not in versiones.columns:
+            versiones[col] = ""
+
+    versiones["Version"] = pd.to_numeric(versiones["Version"], errors="coerce").fillna(1).astype(int)
+
+    if not (versiones["Activa"].astype(str).str.lower().isin(["sí", "si", "true", "1"])).any():
+        versiones.loc[versiones.index[0], "Activa"] = "Sí"
+
+    return versiones
+
+
+def normalizar_asignaciones(asignaciones, asistentes):
+    if asignaciones.empty:
+        base = asistentes[["ID", "Mesa", "Asiento"]].copy()
+        base = base[base["Mesa"].notna()]
+        base.insert(0, "Version", 1)
+        asignaciones = base
+
+    for col in COLUMNAS_ASIGNACIONES:
+        if col not in asignaciones.columns:
+            asignaciones[col] = ""
+
+    asignaciones["Version"] = pd.to_numeric(asignaciones["Version"], errors="coerce").fillna(1).astype(int)
+    asignaciones["ID"] = asignaciones["ID"].astype(str)
+    asignaciones["Mesa"] = pd.to_numeric(asignaciones["Mesa"], errors="coerce").astype("Int64")
+    asignaciones["Asiento"] = pd.to_numeric(asignaciones["Asiento"], errors="coerce").astype("Int64")
+
+    return asignaciones
+
+
+def asegurar_hojas_versiones(asistentes):
+    versiones, _ = leer_worksheet(HOJA_VERSIONES, COLUMNAS_VERSIONES)
+    versiones = normalizar_versiones(versiones)
+    escribir_worksheet(HOJA_VERSIONES, versiones, COLUMNAS_VERSIONES)
+
+    asignaciones, _ = leer_worksheet(HOJA_ASIGNACIONES, COLUMNAS_ASIGNACIONES)
+    asignaciones = normalizar_asignaciones(asignaciones, asistentes)
+    escribir_worksheet(HOJA_ASIGNACIONES, asignaciones, COLUMNAS_ASIGNACIONES)
+
+    return versiones, asignaciones
+
+
+@st.cache_data(ttl=5)
+def cargar_datos():
+    asistentes, _ = leer_worksheet(HOJA_ASISTENTES, COLUMNAS_ASISTENTES)
+    mesas, _ = leer_worksheet(HOJA_MESAS, COLUMNAS_MESAS)
+
+    asistentes = normalizar_asistentes(asistentes)
+    mesas = normalizar_mesas(mesas)
+
+    versiones, asignaciones = asegurar_hojas_versiones(asistentes)
+
+    return asistentes, mesas, versiones, asignaciones
 
 
 def recargar_datos():
     st.cache_data.clear()
-    st.session_state.asistentes, st.session_state.mesas = cargar_datos()
+    st.session_state.asistentes, st.session_state.mesas, st.session_state.versiones, st.session_state.asignaciones = cargar_datos()
 
 
-def guardar_asistentes(df):
-    escribir_worksheet(HOJA_ASISTENTES, df)
+def guardar_versiones(versiones):
+    escribir_worksheet(HOJA_VERSIONES, versiones, COLUMNAS_VERSIONES)
     st.cache_data.clear()
-    st.session_state.asistentes, st.session_state.mesas = cargar_datos()
+
+
+def guardar_asignaciones(asignaciones):
+    escribir_worksheet(HOJA_ASIGNACIONES, asignaciones, COLUMNAS_ASIGNACIONES)
+    st.cache_data.clear()
 
 
 if "asistentes" not in st.session_state:
-    st.session_state.asistentes, st.session_state.mesas = cargar_datos()
+    st.session_state.asistentes, st.session_state.mesas, st.session_state.versiones, st.session_state.asignaciones = cargar_datos()
 
 asistentes = st.session_state.asistentes
 mesas = st.session_state.mesas
+versiones = st.session_state.versiones
+asignaciones = st.session_state.asignaciones
+
+
+def version_activa():
+    global versiones
+
+    mask = versiones["Activa"].astype(str).str.lower().isin(["sí", "si", "true", "1"])
+    if mask.any():
+        return int(versiones.loc[mask, "Version"].iloc[0])
+
+    return int(versiones["Version"].min())
+
+
+def nombre_version(v):
+    fila = versiones[versiones["Version"] == v]
+    if len(fila):
+        return str(fila.iloc[0]["Nombre"])
+    return f"Versión {v}"
+
+
+def set_version_activa(v):
+    global versiones
+
+    versiones = versiones.copy()
+    versiones["Activa"] = "No"
+    versiones.loc[versiones["Version"] == int(v), "Activa"] = "Sí"
+    st.session_state.versiones = versiones
+    guardar_versiones(versiones)
+
+
+def crear_version_desde_cero():
+    global versiones, asignaciones
+
+    nueva = int(versiones["Version"].max()) + 1 if len(versiones) else 1
+
+    nueva_fila = pd.DataFrame([{
+        "Version": nueva,
+        "Nombre": f"Versión {nueva}",
+        "Activa": "Sí",
+        "Creada": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }])
+
+    versiones = versiones.copy()
+    versiones["Activa"] = "No"
+    versiones = pd.concat([versiones, nueva_fila], ignore_index=True)
+
+    asignaciones = asignaciones.copy()
+    asignaciones = asignaciones[asignaciones["Version"] != nueva]
+
+    st.session_state.versiones = versiones
+    st.session_state.asignaciones = asignaciones
+
+    guardar_versiones(versiones)
+    guardar_asignaciones(asignaciones)
+
+    return nueva
+
+
+def crear_version_copia(version_origen):
+    global versiones, asignaciones
+
+    nueva = int(versiones["Version"].max()) + 1 if len(versiones) else 1
+
+    nueva_fila = pd.DataFrame([{
+        "Version": nueva,
+        "Nombre": f"Versión {nueva}",
+        "Activa": "Sí",
+        "Creada": datetime.now().strftime("%Y-%m-%d %H:%M"),
+    }])
+
+    copia = asignaciones[asignaciones["Version"] == int(version_origen)].copy()
+    copia["Version"] = nueva
+
+    versiones = versiones.copy()
+    versiones["Activa"] = "No"
+    versiones = pd.concat([versiones, nueva_fila], ignore_index=True)
+
+    asignaciones = pd.concat([asignaciones, copia], ignore_index=True)
+
+    st.session_state.versiones = versiones
+    st.session_state.asignaciones = asignaciones
+
+    guardar_versiones(versiones)
+    guardar_asignaciones(asignaciones)
+
+    return nueva
+
+
+def df_asistentes_version(v):
+    base = asistentes.drop(columns=["Mesa", "Asiento"], errors="ignore").copy()
+    asign = asignaciones[asignaciones["Version"] == int(v)][["ID", "Mesa", "Asiento"]].copy()
+
+    base["ID"] = base["ID"].astype(str)
+    asign["ID"] = asign["ID"].astype(str)
+
+    df = base.merge(asign, on="ID", how="left")
+    df["Mesa"] = pd.to_numeric(df["Mesa"], errors="coerce").astype("Int64")
+    df["Asiento"] = pd.to_numeric(df["Asiento"], errors="coerce").astype("Int64")
+
+    return df
+
+
+VERSION_ACTIVA = version_activa()
+asistentes_v = df_asistentes_version(VERSION_ACTIVA)
 
 
 # =========================================================
@@ -264,7 +462,7 @@ def obtener_posiciones_sobre_imagen():
 # FUNCIONES VISUALES
 # =========================================================
 def conteo_mesa(n):
-    return int((st.session_state.asistentes["Mesa"] == n).sum())
+    return int((asistentes_v["Mesa"] == n).sum())
 
 
 def estado_mesa(n):
@@ -366,7 +564,7 @@ def figura_plano():
 
 
 def figura_mesa(n):
-    invitados = st.session_state.asistentes[st.session_state.asistentes["Mesa"] == n].copy()
+    invitados = asistentes_v[asistentes_v["Mesa"] == n].copy()
     invitados = invitados.sort_values("Asiento", na_position="last")
 
     datos_por_asiento = {}
@@ -462,19 +660,142 @@ def figura_mesa(n):
 
 
 # =========================================================
+# PDF
+# =========================================================
+def texto_seguro(valor):
+    if pd.isna(valor):
+        return ""
+    return str(valor)
+
+
+def datos_mesa_para_pdf(n):
+    df = asistentes_v[asistentes_v["Mesa"] == n].copy()
+    df = df.sort_values("Asiento", na_position="last")
+
+    filas = []
+    for asiento in range(1, CAPACIDAD + 1):
+        fila = df[df["Asiento"] == asiento]
+
+        if len(fila):
+            r = fila.iloc[0]
+            filas.append([
+                asiento,
+                texto_seguro(r.get("Nombre", "")),
+                texto_seguro(r.get("Cargo", "")),
+                texto_seguro(r.get("Empresa", "")),
+            ])
+        else:
+            filas.append([asiento, "Disponible", "", ""])
+
+    return filas
+
+
+def crear_pdf_asignacion():
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=letter,
+        rightMargin=1.2 * cm,
+        leftMargin=1.2 * cm,
+        topMargin=1.0 * cm,
+        bottomMargin=1.0 * cm,
+    )
+
+    styles = getSampleStyleSheet()
+    elementos = []
+
+    titulo = f"Asignación de mesas - {nombre_version(VERSION_ACTIVA)}"
+    elementos.append(Paragraph(titulo, styles["Title"]))
+    elementos.append(Paragraph(datetime.now().strftime("Generado el %d-%m-%Y %H:%M"), styles["Normal"]))
+    elementos.append(Spacer(1, 0.3 * cm))
+
+    mesas_por_pagina = 0
+
+    for n in range(1, 31):
+        if mesas_por_pagina == 2:
+            elementos.append(PageBreak())
+            mesas_por_pagina = 0
+
+        elementos.append(Paragraph(f"Mesa {n}", styles["Heading2"]))
+
+        data = [["Asiento", "Nombre", "Cargo", "Empresa"]] + datos_mesa_para_pdf(n)
+
+        table = Table(
+            data,
+            colWidths=[1.6 * cm, 6.2 * cm, 4.8 * cm, 5.2 * cm],
+            repeatRows=1,
+        )
+
+        table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#D9EAF7")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), colors.black),
+            ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+            ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
+            ("FONTSIZE", (0, 0), (-1, -1), 8),
+            ("ALIGN", (0, 0), (0, -1), "CENTER"),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("GRID", (0, 0), (-1, -1), 0.25, colors.grey),
+            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F7F7F7")]),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+            ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ]))
+
+        elementos.append(table)
+        elementos.append(Spacer(1, 0.4 * cm))
+
+        mesas_por_pagina += 1
+
+    doc.build(elementos)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+# =========================================================
 # INTERFAZ
 # =========================================================
 st.title("Asignación de mesas - Almuerzo protocolar")
 
-if st.button("Recargar datos desde Google Sheets"):
-    recargar_datos()
-    st.rerun()
+col_a, col_b = st.columns([2, 1])
 
-tab1, tab2, tab3, tab4 = st.tabs([
+with col_a:
+    opciones_version = {
+        f"{int(row['Version'])} - {row['Nombre']}": int(row["Version"])
+        for _, row in versiones.sort_values("Version").iterrows()
+    }
+
+    etiqueta_actual = None
+    for etiqueta, valor in opciones_version.items():
+        if valor == VERSION_ACTIVA:
+            etiqueta_actual = etiqueta
+            break
+
+    seleccion_version = st.selectbox(
+        "Versión de asignación activa",
+        list(opciones_version.keys()),
+        index=list(opciones_version.keys()).index(etiqueta_actual) if etiqueta_actual else 0,
+    )
+
+    version_elegida = opciones_version[seleccion_version]
+
+    if version_elegida != VERSION_ACTIVA:
+        set_version_activa(version_elegida)
+        recargar_datos()
+        st.rerun()
+
+with col_b:
+    if st.button("Recargar datos desde Google Sheets"):
+        recargar_datos()
+        st.rerun()
+
+st.caption(f"Estás trabajando en: **{nombre_version(VERSION_ACTIVA)}**")
+
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "Plano general",
     "Detalle de mesa",
     "Asistentes sin mesa",
-    "Editar base completa"
+    "Editar base completa",
+    "Versiones",
+    "PDF"
 ])
 
 
@@ -483,9 +804,9 @@ with tab1:
 
     c1, c2, c3, c4 = st.columns(4)
 
-    c1.metric("Asistentes totales", len(asistentes))
-    c2.metric("Asignados", int(asistentes["Mesa"].notna().sum()))
-    c3.metric("Sin mesa", int(asistentes["Mesa"].isna().sum()))
+    c1.metric("Asistentes totales", len(asistentes_v))
+    c2.metric("Asignados", int(asistentes_v["Mesa"].notna().sum()))
+    c3.metric("Sin mesa", int(asistentes_v["Mesa"].isna().sum()))
     c4.metric("Mesas completas", sum(estado_mesa(n) == "Completa" for n in range(1, 31)))
 
     st.caption("Toca/clickea una mesa sobre el plano o selecciona una mesa manualmente.")
@@ -535,7 +856,7 @@ with tab2:
         )
 
     if st.session_state.get(f"mostrar_detalle_mesa_{n}", False):
-        detalle = asistentes[asistentes["Mesa"] == n].copy()
+        detalle = asistentes_v[asistentes_v["Mesa"] == n].copy()
 
         if len(detalle) == 0:
             st.info("Esta mesa todavía no tiene invitados asignados.")
@@ -557,10 +878,10 @@ with tab2:
         "salvo los que ya pertenecen a esta mesa."
     )
 
-    actuales = asistentes[asistentes["Mesa"] == n].copy()
+    actuales = asistentes_v[asistentes_v["Mesa"] == n].copy()
 
-    disponibles = asistentes[
-        asistentes["Mesa"].isna() | (asistentes["Mesa"] == n)
+    disponibles = asistentes_v[
+        asistentes_v["Mesa"].isna() | (asistentes_v["Mesa"] == n)
     ].copy()
 
     disponibles["Etiqueta"] = disponibles["ID"].astype(str) + " - " + disponibles["Nombre"].astype(str)
@@ -573,7 +894,7 @@ with tab2:
     for _, row in disponibles.iterrows():
         opciones[row["Etiqueta"]] = row["ID"]
 
-    asignaciones = {}
+    asignaciones_nuevas = {}
 
     for asiento in range(1, CAPACIDAD + 1):
         fila = actuales[actuales["Asiento"] == asiento]
@@ -592,13 +913,13 @@ with tab2:
             f"Asiento {asiento}",
             etiquetas,
             index=index_default,
-            key=f"mesa_{n}_asiento_{asiento}"
+            key=f"mesa_{n}_version_{VERSION_ACTIVA}_asiento_{asiento}"
         )
 
-        asignaciones[asiento] = opciones[elegido]
+        asignaciones_nuevas[asiento] = opciones[elegido]
 
     if st.button("Guardar asignación de esta mesa", type="primary"):
-        ids_elegidos = [str(v) for v in asignaciones.values() if v is not None]
+        ids_elegidos = [str(v) for v in asignaciones_nuevas.values() if v is not None]
 
         if len(ids_elegidos) != len(set(ids_elegidos)):
             st.error("Hay un invitado repetido en más de un asiento. Corrige antes de guardar.")
@@ -607,18 +928,37 @@ with tab2:
             st.error("Esta mesa supera los 10 invitados.")
 
         else:
-            df = st.session_state.asistentes.copy()
+            df_asig = asignaciones.copy()
 
-            mask_mesa = df["Mesa"] == n
-            df.loc[mask_mesa, ["Mesa", "Asiento"]] = pd.NA
+            mask_version_mesa = (df_asig["Version"] == VERSION_ACTIVA) & (df_asig["Mesa"] == n)
+            df_asig = df_asig[~mask_version_mesa].copy()
 
-            for asiento, invitado_id in asignaciones.items():
+            nuevas_filas = []
+
+            for asiento, invitado_id in asignaciones_nuevas.items():
                 if invitado_id is not None:
-                    mask_id = df["ID"].astype(str) == str(invitado_id)
-                    df.loc[mask_id, "Mesa"] = n
-                    df.loc[mask_id, "Asiento"] = asiento
+                    nuevas_filas.append({
+                        "Version": VERSION_ACTIVA,
+                        "ID": str(invitado_id),
+                        "Mesa": n,
+                        "Asiento": asiento,
+                    })
 
-            guardar_asistentes(df)
+            # Si algún invitado seleccionado estaba asignado a otra mesa en la misma versión,
+            # se elimina su asignación anterior antes de guardar la nueva.
+            ids_nuevos = [str(f["ID"]) for f in nuevas_filas]
+            df_asig = df_asig[
+                ~(
+                    (df_asig["Version"] == VERSION_ACTIVA)
+                    & (df_asig["ID"].astype(str).isin(ids_nuevos))
+                )
+            ].copy()
+
+            if nuevas_filas:
+                df_asig = pd.concat([df_asig, pd.DataFrame(nuevas_filas)], ignore_index=True)
+
+            guardar_asignaciones(df_asig)
+            recargar_datos()
 
             st.success("Asignación guardada en Google Sheets.")
             st.rerun()
@@ -627,23 +967,24 @@ with tab2:
 with tab3:
     st.subheader("Asistentes sin mesa")
 
-    sin_mesa = asistentes[asistentes["Mesa"].isna()].copy()
+    sin_mesa = asistentes_v[asistentes_v["Mesa"].isna()].copy()
 
     st.write(f"Total sin mesa: **{len(sin_mesa)}**")
 
     st.dataframe(
         sin_mesa[["ID", "Nombre", "Cargo", "Empresa", "Confirmación"]],
-        use_container_width=True
+        use_container_width=True,
+        hide_index=True
     )
 
 
 with tab4:
     st.subheader("Editar base completa")
 
-    st.warning("Aquí puedes editar manualmente Mesa y Asiento. Luego presiona Guardar cambios.")
+    st.warning("Esta edición cambia solo la asignación de mesas de la versión activa.")
 
     editado = st.data_editor(
-        asistentes,
+        asistentes_v,
         use_container_width=True,
         num_rows="fixed",
         column_config={
@@ -688,15 +1029,74 @@ with tab4:
                 st.write("- " + e)
 
         else:
-            guardar_asistentes(temp)
+            df_asig = asignaciones.copy()
+            df_asig = df_asig[df_asig["Version"] != VERSION_ACTIVA].copy()
+
+            nuevas = temp[temp["Mesa"].notna()][["ID", "Mesa", "Asiento"]].copy()
+            nuevas.insert(0, "Version", VERSION_ACTIVA)
+
+            df_asig = pd.concat([df_asig, nuevas[COLUMNAS_ASIGNACIONES]], ignore_index=True)
+
+            guardar_asignaciones(df_asig)
+            recargar_datos()
 
             st.success("Cambios guardados en Google Sheets.")
             st.rerun()
+
+
+with tab5:
+    st.subheader("Versiones de asignación")
+
+    st.dataframe(
+        versiones.sort_values("Version"),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.markdown("### Crear versión desde cero")
+        st.caption("Crea una versión nueva sin invitados asignados.")
+        if st.button("Crear nueva versión vacía"):
+            nueva = crear_version_desde_cero()
+            recargar_datos()
+            st.success(f"Se creó la Versión {nueva}.")
+            st.rerun()
+
+    with c2:
+        st.markdown("### Crear copia de la versión activa")
+        st.caption("Duplica la asignación actual para probar otra distribución.")
+        if st.button("Crear copia de esta versión"):
+            nueva = crear_version_copia(VERSION_ACTIVA)
+            recargar_datos()
+            st.success(f"Se creó la Versión {nueva} como copia.")
+            st.rerun()
+
+
+with tab6:
+    st.subheader("Exportar PDF")
+
+    st.write(
+        "Genera un PDF tamaño carta con la asignación de la versión activa. "
+        "El documento incluye dos mesas por página."
+    )
+
+    pdf_bytes = crear_pdf_asignacion()
+
+    st.download_button(
+        label="Descargar PDF de asignación",
+        data=pdf_bytes,
+        file_name=f"asignacion_mesas_{nombre_version(VERSION_ACTIVA).replace(' ', '_')}.pdf",
+        mime="application/pdf",
+        type="primary",
+    )
 
 
 st.divider()
 
 st.caption(
     "Base de datos: Google Sheets. "
-    "Los círculos de mesas usan las coordenadas del archivo Posiciones_Mesas.csv."
+    "Las versiones se guardan en las hojas Versiones y Asignaciones. "
+    "El PDF se genera en tamaño carta con dos mesas por página."
 )
