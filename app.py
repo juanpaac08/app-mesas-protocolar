@@ -638,6 +638,9 @@ def figura_mesa(n):
 
     fig = go.Figure()
 
+    # =====================================================
+    # MESA CENTRAL
+    # =====================================================
     fig.add_shape(
         type="circle",
         x0=-0.45,
@@ -651,57 +654,86 @@ def figura_mesa(n):
     fig.add_annotation(
         x=0,
         y=0,
-        text=f"MESA {n}",
+        text=f"<b>MESA {n}</b>",
         showarrow=False,
-        font=dict(color="white", size=18)
+        font=dict(color="white", size=18),
     )
 
-    xs, ys, textos, custom = [], [], [], []
-
+    # =====================================================
+    # ASIENTOS
+    # =====================================================
     for asiento in range(1, CAPACIDAD + 1):
+
         ang = math.pi / 2 - 2 * math.pi * (asiento - 1) / CAPACIDAD
 
-        x = 1.35 * math.cos(ang)
-        y = 1.35 * math.sin(ang)
+        x = 1.38 * math.cos(ang)
+        y = 1.38 * math.sin(ang)
 
         d = datos_por_asiento[asiento]
 
-        xs.append(x)
-        ys.append(y)
-        textos.append(f"{asiento}. {d['nombre']}")
-        custom.append([asiento, d["id"], d["nombre"], d["cargo"], d["empresa"]])
+        # ---------------------------------------------
+        # CÍRCULO DEL INVITADO
+        # ---------------------------------------------
+        radio = 0.33
 
-    fig.add_trace(go.Scatter(
-        x=xs,
-        y=ys,
-        mode="markers+text",
-        marker=dict(size=12, color="rgba(0,0,0,0)"),
-        text=textos,
-        textposition="middle center",
-        textfont=dict(size=12, color=TEXTO_TEMA),
-        customdata=custom,
-        hovertemplate=(
-            "Asiento %{customdata[0]}<br>"
-            "ID: %{customdata[1]}<br>"
-            "Nombre: %{customdata[2]}<br>"
-            "Cargo: %{customdata[3]}<br>"
-            "Empresa: %{customdata[4]}"
-            "<extra></extra>"
-        ),
-    ))
+        fig.add_shape(
+            type="circle",
+            x0=x - radio,
+            y0=y - radio,
+            x1=x + radio,
+            y1=y + radio,
+            fillcolor="white",
+            line=dict(color="#333333", width=2),
+        )
 
-    fig.update_xaxes(visible=False, range=(-2.2, 2.2), fixedrange=True)
-    fig.update_yaxes(visible=False, range=(-1.9, 1.9), scaleanchor="x", scaleratio=1, fixedrange=True)
+        # ---------------------------------------------
+        # TEXTO
+        # ---------------------------------------------
+        texto = (
+            f"<b>{d['nombre']}</b>"
+            f"<br><span style='font-size:10px'>{d['cargo']}</span>"
+            f"<br><span style='font-size:10px'>{d['empresa']}</span>"
+        )
+
+        fig.add_annotation(
+            x=x,
+            y=y,
+            text=texto,
+            showarrow=False,
+            align="center",
+            font=dict(
+                size=11,
+                color="black",
+                family="Arial"
+            ),
+        )
+
+    # =====================================================
+    # LAYOUT
+    # =====================================================
+    fig.update_xaxes(
+        visible=False,
+        range=(-2.2, 2.2),
+        fixedrange=True
+    )
+
+    fig.update_yaxes(
+        visible=False,
+        range=(-1.9, 1.9),
+        scaleanchor="x",
+        scaleratio=1,
+        fixedrange=True
+    )
 
     fig.update_layout(
-        height=430,
+        height=520,
         margin=dict(l=0, r=0, t=0, b=0),
         showlegend=False,
         paper_bgcolor=FONDO_TEMA,
         plot_bgcolor=FONDO_TEMA,
         font=dict(color=TEXTO_TEMA),
         dragmode=False,
-        hovermode="closest",
+        hovermode=False,
     )
 
     return fig
