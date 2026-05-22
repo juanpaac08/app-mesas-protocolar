@@ -685,8 +685,6 @@ def figura_mesa(n):
         texto = (
             f"<span style='color:{TEXTO_TEMA}'>"
             f"<b>{d['nombre']}</b>"
-            f"<br><span style='font-size:10px; color:{TEXTO_TEMA}'>{d['cargo']}</span>"
-            f"<br><span style='font-size:10px; color:{TEXTO_TEMA}'>{d['empresa']}</span>"
             f"</span>"
         )
 
